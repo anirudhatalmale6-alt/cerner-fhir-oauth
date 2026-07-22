@@ -1,0 +1,5 @@
+# Never commit secrets or the private key.
+.env
+keys/*.pem
+jwks.json
+bin/
