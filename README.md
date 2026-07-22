@@ -93,6 +93,26 @@ cp .env.example .env
 
 ---
 
+## 3b. Two modes: `AUTH_MODE`
+
+The tool can reach FHIR two ways, set by `AUTH_MODE` in `.env`:
+
+- **`AUTH_MODE=open`** — skip OAuth entirely and call an **open/unauthenticated**
+  FHIR endpoint directly. Point `CERNER_FHIR_BASE_URL` at the `fhir-open` URL and
+  run — you get real Patient JSON with **zero registration**. Great for seeing the
+  Patient-by-MRN and Patient-by-id calls work immediately.
+- **`AUTH_MODE=backend`** (default) — the full OAuth 2.0 token exchange, then
+  Bearer-authenticated calls. **This is what a live hospital requires**, because a
+  real EHR never exposes patient data on an open endpoint.
+
+A note for the live-hospital deployment: OAuth is not optional there. Protected
+FHIR always demands a Bearer token, and that token comes from this exact backend
+flow. The difference in production is only *config, not code* — the hospital's
+Oracle Health / Cerner administrator provisions your system app in **their**
+tenant (the production equivalent of the sandbox Code Console), hands you a
+Client ID and registers your public key, and you point `CERNER_TOKEN_URL` /
+`CERNER_FHIR_BASE_URL` at their production tenant. Same binary, new `.env`.
+
 ## 4. Run it — 4 commands
 
 ```bash

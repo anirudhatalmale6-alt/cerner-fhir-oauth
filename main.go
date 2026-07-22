@@ -30,18 +30,13 @@ func main() {
 func run() error {
 	loadDotEnv(".env")
 
-	cfg := &oauth.Config{
-		ClientID: mustEnv("CERNER_CLIENT_ID"),
-		TokenURL: mustEnv("CERNER_TOKEN_URL"),
-		Scopes:   envOr("CERNER_SCOPES", "system/Patient.read"),
-		KeyID:    os.Getenv("CERNER_KEY_ID"),
-	}
-	keyPath := envOr("CERNER_PRIVATE_KEY_PATH", "keys/private.pem")
-	key, err := oauth.LoadPrivateKey(keyPath)
-	if err != nil {
-		return err
-	}
-	cfg.PrivateKey = key
+	// AUTH_MODE selects how we reach FHIR:
+	//   backend (default) — full OAuth 2.0 token exchange, then Bearer-authed calls.
+	//                        This is what a real hospital requires.
+	//   open              — skip OAuth entirely and hit an OPEN/unauthenticated
+	//                        FHIR endpoint directly. Handy to see the Patient calls
+	//                        work with zero registration. Real PHI is never open.
+	authMode := strings.ToLower(envOr("AUTH_MODE", "backend"))
 
 	fhirBase := mustEnv("CERNER_FHIR_BASE_URL")
 	mrn := envOr("PATIENT_MRN", "")
@@ -52,25 +47,45 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// ---- STEP 1: get an access token -------------------------------------
-	section("STEP 1  Exchange backend credentials for an access token")
-	tok, tTrace, err := oauth.FetchToken(ctx, httpClient, cfg, time.Now())
-	if tTrace != nil {
-		fmt.Println("--- Signed client-assertion JWT (paste at jwt.io to inspect) ---")
-		fmt.Println(tTrace.ClientAssertJWT)
-		fmt.Println()
-		fmt.Println(">>> REQUEST")
-		fmt.Println(tTrace.RequestLine)
-		fmt.Println(tTrace.RequestBody)
-		fmt.Printf("\n<<< RESPONSE (%d)\n%s\n", tTrace.ResponseCode, tTrace.ResponseBody)
-	}
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\n[OK] Access token acquired. Type=%s ExpiresIn=%ds Scope=%q\n",
-		tok.TokenType, tok.ExpiresIn, tok.Scope)
+	accessToken := ""
+	if authMode == "open" {
+		section("AUTH_MODE=open  Direct FHIR calls, no OAuth (unauthenticated endpoint)")
+		fmt.Println("Skipping token exchange. Calling FHIR directly at:", fhirBase)
+	} else {
+		cfg := &oauth.Config{
+			ClientID: mustEnv("CERNER_CLIENT_ID"),
+			TokenURL: mustEnv("CERNER_TOKEN_URL"),
+			Scopes:   envOr("CERNER_SCOPES", "system/Patient.read"),
+			KeyID:    os.Getenv("CERNER_KEY_ID"),
+		}
+		keyPath := envOr("CERNER_PRIVATE_KEY_PATH", "keys/private.pem")
+		key, err := oauth.LoadPrivateKey(keyPath)
+		if err != nil {
+			return err
+		}
+		cfg.PrivateKey = key
 
-	fc := &fhir.Client{BaseURL: fhirBase, AccessToken: tok.AccessToken, HTTP: httpClient}
+		// ---- STEP 1: get an access token ---------------------------------
+		section("STEP 1  Exchange backend credentials for an access token")
+		tok, tTrace, err := oauth.FetchToken(ctx, httpClient, cfg, time.Now())
+		if tTrace != nil {
+			fmt.Println("--- Signed client-assertion JWT (paste at jwt.io to inspect) ---")
+			fmt.Println(tTrace.ClientAssertJWT)
+			fmt.Println()
+			fmt.Println(">>> REQUEST")
+			fmt.Println(tTrace.RequestLine)
+			fmt.Println(tTrace.RequestBody)
+			fmt.Printf("\n<<< RESPONSE (%d)\n%s\n", tTrace.ResponseCode, tTrace.ResponseBody)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\n[OK] Access token acquired. Type=%s ExpiresIn=%ds Scope=%q\n",
+			tok.TokenType, tok.ExpiresIn, tok.Scope)
+		accessToken = tok.AccessToken
+	}
+
+	fc := &fhir.Client{BaseURL: fhirBase, AccessToken: accessToken, HTTP: httpClient}
 
 	// ---- STEP 2: search Patient by MRN -----------------------------------
 	if mrn != "" {

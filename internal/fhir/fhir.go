@@ -58,7 +58,12 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) (*Trace, er
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
+	// When AccessToken is empty we're hitting an OPEN (unauthenticated) endpoint,
+	// so we omit the Authorization header entirely. Any protected server (a real
+	// hospital) will reject that with 401 — which is the point of OAuth.
+	if c.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
+	}
 	req.Header.Set("Accept", "application/fhir+json")
 
 	trace := &Trace{RequestLine: fmt.Sprintf("GET %s", full)}
