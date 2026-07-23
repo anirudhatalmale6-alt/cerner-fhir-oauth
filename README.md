@@ -113,6 +113,29 @@ tenant (the production equivalent of the sandbox Code Console), hands you a
 Client ID and registers your public key, and you point `CERNER_TOKEN_URL` /
 `CERNER_FHIR_BASE_URL` at their production tenant. Same binary, new `.env`.
 
+## 3c. Switching EMRs is config only (Cerner → Meditech)
+
+The code is vendor-agnostic. Every credential/endpoint is an env var, and there
+are two knobs that absorb the differences between EMRs:
+
+- **`TOKEN_AUTH_METHOD`** — `private_key_jwt` (Cerner), or `client_secret_post` /
+  `client_secret_basic` if the EMR issues a client secret instead of registering
+  a public key.
+- Generic **`EMR_*`** names (`EMR_CLIENT_ID`, `EMR_TOKEN_URL`, `EMR_FHIR_BASE_URL`,
+  `EMR_CLIENT_SECRET`, `EMR_KEY_ID`, `EMR_SCOPES`, `EMR_PRIVATE_KEY_PATH`). The
+  `CERNER_*` names still work as fallbacks.
+
+So moving to Meditech is a new `.env`, not new code:
+
+```bash
+cp .env.meditech.example .env   # fill in Meditech's URLs + credentials
+make run
+```
+
+`.env.meditech.example` is included as a starting point. Whether Meditech hands
+you a **client secret** or registers your **public key**, set `TOKEN_AUTH_METHOD`
+accordingly and the same binary runs it.
+
 ## 4. Run it — 4 commands
 
 ```bash

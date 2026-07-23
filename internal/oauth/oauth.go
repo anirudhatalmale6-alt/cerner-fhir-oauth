@@ -16,6 +16,7 @@ package oauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,15 +29,33 @@ import (
 	"github.com/google/uuid"
 )
 
-// Config holds everything needed to obtain a token. Every field maps to a value
-// you copy out of the Oracle Health / Cerner "Code Console" when you register a
-// System (backend) application. See README.md for exactly where each one lives.
+// AuthMethod selects HOW we prove our identity to the token endpoint. Different
+// EMRs choose different methods, so this is what makes switching vendors a config
+// change instead of a code change.
+type AuthMethod string
+
+const (
+	// PrivateKeyJWT: sign a JWT with our private key (SMART Backend Services).
+	// This is what Cerner / Oracle Health uses.
+	PrivateKeyJWT AuthMethod = "private_key_jwt"
+	// ClientSecretPost: send client_id + client_secret in the POST body. Common
+	// for other backends (some Meditech setups, Epic app-with-secret, etc.).
+	ClientSecretPost AuthMethod = "client_secret_post"
+	// ClientSecretBasic: send client_id:client_secret as an HTTP Basic header.
+	ClientSecretBasic AuthMethod = "client_secret_basic"
+)
+
+// Config holds everything needed to obtain a token. For Cerner, the values map
+// to what you register in the Code Console; for another EMR you point the same
+// fields at that vendor's values. See README.md.
 type Config struct {
-	ClientID   string          // the App/Client ID shown in the console
-	TokenURL   string          // the "Token" endpoint for your tenant
-	Scopes     string          // space-separated, e.g. "system/Patient.read"
-	KeyID      string          // "kid" of the public key you uploaded (optional but recommended)
-	PrivateKey *rsaPrivateKey  // your RSA private key (loaded from a PEM file)
+	Method       AuthMethod     // how to authenticate (default private_key_jwt)
+	ClientID     string         // the App/Client ID from the vendor
+	ClientSecret string         // only for the client_secret_* methods
+	TokenURL     string         // the vendor's OAuth token endpoint
+	Scopes       string         // space-separated, e.g. "system/Patient.read"
+	KeyID        string         // "kid" of the uploaded public key (private_key_jwt)
+	PrivateKey   *rsaPrivateKey // your RSA private key (private_key_jwt only)
 }
 
 // TokenResponse is the raw JSON the token endpoint returns on success.
@@ -92,18 +111,33 @@ func buildClientAssertion(cfg *Config, now time.Time) (string, error) {
 }
 
 // FetchToken performs the full client_credentials exchange and returns the token
-// plus a Trace of exactly what went over the wire.
+// plus a Trace of exactly what went over the wire. It branches on cfg.Method so
+// the SAME call works whether the vendor wants a signed JWT or a client secret.
 func FetchToken(ctx context.Context, httpClient *http.Client, cfg *Config, now time.Time) (*TokenResponse, *Trace, error) {
-	assertion, err := buildClientAssertion(cfg, now)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("scope", cfg.Scopes)
-	form.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
-	form.Set("client_assertion", assertion)
+
+	assertion := ""
+	basicAuth := ""
+
+	switch cfg.Method {
+	case ClientSecretPost:
+		form.Set("client_id", cfg.ClientID)
+		form.Set("client_secret", cfg.ClientSecret)
+	case ClientSecretBasic:
+		form.Set("client_id", cfg.ClientID)
+		basicAuth = base64.StdEncoding.EncodeToString([]byte(cfg.ClientID + ":" + cfg.ClientSecret))
+	default: // PrivateKeyJWT (Cerner)
+		var err error
+		assertion, err = buildClientAssertion(cfg, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		form.Set("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+		form.Set("client_assertion", assertion)
+	}
+
 	body := form.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.TokenURL, strings.NewReader(body))
@@ -112,10 +146,13 @@ func FetchToken(ctx context.Context, httpClient *http.Client, cfg *Config, now t
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	if basicAuth != "" {
+		req.Header.Set("Authorization", "Basic "+basicAuth)
+	}
 
 	trace := &Trace{
 		RequestLine:     fmt.Sprintf("POST %s", cfg.TokenURL),
-		RequestBody:     redactAssertion(body, assertion),
+		RequestBody:     redactSecrets(redactAssertion(body, assertion), cfg.ClientSecret),
 		ClientAssertJWT: assertion,
 	}
 
@@ -151,4 +188,12 @@ func redactAssertion(body, assertion string) string {
 		short = short[:12] + "...(truncated, see full JWT below)..." + short[len(short)-8:]
 	}
 	return strings.ReplaceAll(body, url.QueryEscape(assertion), short)
+}
+
+// redactSecrets hides a client secret so it never shows up in printed traces.
+func redactSecrets(body, secret string) string {
+	if secret == "" {
+		return body
+	}
+	return strings.ReplaceAll(body, url.QueryEscape(secret), "***REDACTED***")
 }

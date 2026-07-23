@@ -38,7 +38,13 @@ func run() error {
 	//                        work with zero registration. Real PHI is never open.
 	authMode := strings.ToLower(envOr("AUTH_MODE", "backend"))
 
-	fhirBase := mustEnv("CERNER_FHIR_BASE_URL")
+	// Vendor-agnostic config: prefer the generic EMR_* names, fall back to the
+	// original CERNER_* names so existing .env files keep working. Switching from
+	// Cerner to Meditech (or any EMR) is therefore JUST env changes.
+	fhirBase := firstEnv("EMR_FHIR_BASE_URL", "CERNER_FHIR_BASE_URL")
+	if fhirBase == "" {
+		return fmt.Errorf("set EMR_FHIR_BASE_URL (or CERNER_FHIR_BASE_URL)")
+	}
 	mrn := envOr("PATIENT_MRN", "")
 	mrnSystem := envOr("PATIENT_MRN_SYSTEM", "")
 	patientID := envOr("PATIENT_ID", "")
@@ -52,26 +58,48 @@ func run() error {
 		section("AUTH_MODE=open  Direct FHIR calls, no OAuth (unauthenticated endpoint)")
 		fmt.Println("Skipping token exchange. Calling FHIR directly at:", fhirBase)
 	} else {
+		// TOKEN_AUTH_METHOD picks how we authenticate to the token endpoint:
+		//   private_key_jwt (default) — signed JWT, e.g. Cerner
+		//   client_secret_post / client_secret_basic — a client secret, e.g. some
+		//   Meditech / other backends. This is the knob that keeps a new EMR to
+		//   config only.
+		method := oauth.AuthMethod(strings.ToLower(firstEnv("TOKEN_AUTH_METHOD", "")))
+		if method == "" {
+			method = oauth.PrivateKeyJWT
+		}
 		cfg := &oauth.Config{
-			ClientID: mustEnv("CERNER_CLIENT_ID"),
-			TokenURL: mustEnv("CERNER_TOKEN_URL"),
-			Scopes:   envOr("CERNER_SCOPES", "system/Patient.read"),
-			KeyID:    os.Getenv("CERNER_KEY_ID"),
+			Method:       method,
+			ClientID:     firstEnv("EMR_CLIENT_ID", "CERNER_CLIENT_ID"),
+			ClientSecret: firstEnv("EMR_CLIENT_SECRET", "CERNER_CLIENT_SECRET"),
+			TokenURL:     firstEnv("EMR_TOKEN_URL", "CERNER_TOKEN_URL"),
+			Scopes:       envOr2("EMR_SCOPES", "CERNER_SCOPES", "system/Patient.read"),
+			KeyID:        firstEnv("EMR_KEY_ID", "CERNER_KEY_ID"),
 		}
-		keyPath := envOr("CERNER_PRIVATE_KEY_PATH", "keys/private.pem")
-		key, err := oauth.LoadPrivateKey(keyPath)
-		if err != nil {
-			return err
+		if cfg.ClientID == "" {
+			return fmt.Errorf("set EMR_CLIENT_ID (or CERNER_CLIENT_ID)")
 		}
-		cfg.PrivateKey = key
+		if cfg.TokenURL == "" {
+			return fmt.Errorf("set EMR_TOKEN_URL (or CERNER_TOKEN_URL)")
+		}
+		// The private key is only needed for the JWT method.
+		if method == oauth.PrivateKeyJWT {
+			keyPath := envOr2("EMR_PRIVATE_KEY_PATH", "CERNER_PRIVATE_KEY_PATH", "keys/private.pem")
+			key, err := oauth.LoadPrivateKey(keyPath)
+			if err != nil {
+				return err
+			}
+			cfg.PrivateKey = key
+		}
 
 		// ---- STEP 1: get an access token ---------------------------------
-		section("STEP 1  Exchange backend credentials for an access token")
+		section("STEP 1  Exchange backend credentials for an access token (" + string(method) + ")")
 		tok, tTrace, err := oauth.FetchToken(ctx, httpClient, cfg, time.Now())
 		if tTrace != nil {
-			fmt.Println("--- Signed client-assertion JWT (paste at jwt.io to inspect) ---")
-			fmt.Println(tTrace.ClientAssertJWT)
-			fmt.Println()
+			if tTrace.ClientAssertJWT != "" {
+				fmt.Println("--- Signed client-assertion JWT (paste at jwt.io to inspect) ---")
+				fmt.Println(tTrace.ClientAssertJWT)
+				fmt.Println()
+			}
 			fmt.Println(">>> REQUEST")
 			fmt.Println(tTrace.RequestLine)
 			fmt.Println(tTrace.RequestBody)
@@ -141,6 +169,25 @@ func mustEnv(k string) string {
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// firstEnv returns the first of the given env vars that is set (non-empty), or "".
+// Lets generic EMR_* names take precedence while CERNER_* names still work.
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// envOr2 is firstEnv with a default fallback.
+func envOr2(k1, k2, def string) string {
+	if v := firstEnv(k1, k2); v != "" {
 		return v
 	}
 	return def
